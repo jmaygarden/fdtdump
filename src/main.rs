@@ -5,7 +5,9 @@ extern crate memmap;
 use memmap::MmapOptions;
 
 use std::fs::File;
+use std::io::Write;
 use std::mem::size_of;
+use std::path::PathBuf;
 use std::ptr::read_unaligned;
 use std::slice;
 
@@ -110,7 +112,32 @@ impl FdtDumper {
         Ok(())
     }
 
+    fn extract_images(&mut self, node: &DevTreeIndexNode) {
+        let image_path = self.image_path.take().unwrap();
+
+        std::fs::create_dir_all(image_path.as_path()).expect("image path should be creatable");
+
+        for child in node.children() {
+            match child.name() {
+                Ok(image_name) => match child.props().find(|p| p.name() == Ok("data")) {
+                    Some(data) => {
+                        let mut path = image_path.clone();
+                        path.push(image_name);
+                        let mut file = File::create(path).expect("image file should be creatable");
+                        file.write_all(data.propbuf())
+                            .expect("image file should be writable");
+                    }
+                    None => eprintln!("no data found for image `{:?}`", image_name),
+                },
+                Err(err) => eprintln!("error parsing image: {:?}", err),
+            }
+        }
+    }
+
     fn dump_level(&mut self, node: &DevTreeIndexNode) -> DevTreeResult<()> {
+        if self.image_path.is_some() && node.name() == Ok("images") {
+            self.extract_images(node);
+        }
         self.dump_node(node)?;
         self.indent += 1;
         for prop in node.props() {
@@ -152,12 +179,13 @@ impl FdtDumper {
         self.dump.push('\n');
     }
 
-    pub(crate) fn dump_tree(buf: &[u8]) -> DevTreeResult<()> {
+    pub(crate) fn dump_tree(buf: &[u8], image_path: Option<PathBuf>) -> DevTreeResult<()> {
         let (_vec, index) = unsafe { allocate_index(buf)? };
 
         let mut dumper = FdtDumper {
             dump: String::new(),
             indent: 0,
+            image_path,
         };
 
         dumper.dump_metadata(&index);
@@ -170,6 +198,7 @@ impl FdtDumper {
 struct FdtDumper {
     dump: String,
     indent: usize,
+    image_path: Option<PathBuf>,
 }
 
 fn main() {
@@ -181,9 +210,15 @@ fn main() {
                 .required(true)
                 .help("Path to dtb file"),
         )
+        .arg(
+            clap::Arg::new("extract-images")
+                .short('e')
+                .help("Output extracted images to the provided path"),
+        )
         .get_matches();
 
     let fname = args.get_one::<String>("dtb-file").unwrap();
+    let image_path = args.get_one::<String>("extract-images").map(PathBuf::from);
 
     let file = File::open(fname).unwrap_or_else(|_| panic!("Unable to open {}", fname));
 
@@ -195,5 +230,5 @@ fn main() {
 
     let slice = unsafe { slice::from_raw_parts(mmap.as_ptr(), mmap.len()) };
 
-    FdtDumper::dump_tree(slice).unwrap();
+    FdtDumper::dump_tree(slice, image_path).unwrap();
 }
